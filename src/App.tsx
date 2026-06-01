@@ -5,6 +5,9 @@ import { CSS } from '@dnd-kit/utilities';
 import { Download, File as FileIcon, Search, Eye, EyeOff, HardDriveDownload, Calendar, Plus, Edit2, Trash2, X, LayoutGrid, Settings, Menu, UploadCloud, ChevronDown, Folder, GripVertical, ArrowUp, ArrowDown, LogOut, LogIn, Filter, Check, Loader2, Book, ArrowLeft, Pause } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DocumentItem } from './types';
+import { collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, query, where } from 'firebase/firestore';
+import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
+import { db, auth, googleProvider, handleFirestoreError, OperationType } from './firebase';
 
 const CircularProgress = ({ progress, size = 20, strokeWidth = 3, color = 'text-blue-500' }: { progress: number, size?: number, strokeWidth?: number, color?: string }) => {
   return (
@@ -98,49 +101,128 @@ export default function App() {
     }
   }, [dbError]);
 
-  const fetchData = async () => {
-    try {
-      const [docsRes, catsRes, adminsRes] = await Promise.all([
-        fetch('/api/docs'),
-        fetch('/api/categories'),
-        fetch('/api/admins')
-      ]);
-      
-      if (!docsRes.ok) {
-        const errorData = await docsRes.json();
-        if (docsRes.status === 500 && errorData.error) {
-          setDbError(errorData.error);
-        }
-      } else {
-        setDocs(await docsRes.json());
-        setDbError(null);
-      }
-      
-      if (catsRes.ok) setCategories(await catsRes.json());
-      if (adminsRes.ok) setAdmins(await adminsRes.json());
-      
-      setIsLoadingDocs(false);
-      setIsLoadingCategories(false);
-    } catch (error) {
-      console.error("Error fetching data:", error);
-      setIsLoadingDocs(false);
-      setIsLoadingCategories(false);
-    }
-  };
-
+  // 1. Dynamics Auth state synchronization
   useEffect(() => {
-    const savedUser = localStorage.getItem('currentUser');
-    if (savedUser) setCurrentUser(JSON.parse(savedUser));
-    fetchData();
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        const u = {
+          email: user.email?.toLowerCase() || '',
+          displayName: user.displayName || user.email?.toLowerCase().split('@')[0],
+          photoURL: user.photoURL || undefined
+        };
+        setCurrentUser(u);
+      } else {
+        setCurrentUser(null);
+      }
+    });
+    return () => {
+      unsubscribeAuth();
+    };
   }, []);
+
+  // 2. Categories subscription (Always allowed publicly)
+  useEffect(() => {
+    const unsubscribeCats = onSnapshot(collection(db, 'categories'), (snapshot) => {
+      const items: any[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        items.push({
+          id: doc.id,
+          name: data.name,
+          subTypes: data.subTypes || []
+        });
+      });
+      setCategories(items);
+      setIsLoadingCategories(false);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'categories');
+    });
+    return () => {
+      unsubscribeCats();
+    };
+  }, []);
+
+  // 3. Admins subscription (Only when signed in)
+  useEffect(() => {
+    if (!currentUser) {
+      setAdmins([
+        { email: 'broponleu998@gmail.com', addedAt: '2026-06-01' },
+        { email: 'mrponleu20000@gmail.com', addedAt: '2026-06-01' }
+      ]);
+      return;
+    }
+    const unsubscribeAdmins = onSnapshot(collection(db, 'admins'), (snapshot) => {
+      const items: any[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        items.push({
+          email: doc.id,
+          addedAt: data.addedAt || ''
+        });
+      });
+      if (items.length === 0) {
+        setAdmins([
+          { email: 'broponleu998@gmail.com', addedAt: '2026-06-01' },
+          { email: 'mrponleu20000@gmail.com', addedAt: '2026-06-01' }
+        ]);
+      } else {
+        setAdmins(items);
+      }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'admins');
+    });
+    return () => {
+      unsubscribeAdmins();
+    };
+  }, [currentUser]);
+
+  // 4. Docs subscription (Depends dynamically on administrative role status)
+  useEffect(() => {
+    const docsRef = collection(db, 'docs');
+    const q = isAdminState
+      ? docsRef
+      : query(docsRef, where('isHidden', '==', false));
+
+    const unsubscribeDocs = onSnapshot(q, (snapshot) => {
+      const items: DocumentItem[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        items.push({
+          id: doc.id,
+          title: data.title || '',
+          description: data.description || '',
+          coverUrl: data.coverUrl || '',
+          fileSize: data.fileSize || '',
+          fileType: data.fileType || '',
+          downloadUrl: data.downloadUrl || '',
+          uploadDate: data.uploadDate || '',
+          downloads: Number(data.downloads || 0),
+          type: data.type || '',
+          subType: data.subType || '',
+          isHidden: !!data.isHidden,
+          tags: data.tags || []
+        });
+      });
+      setDocs(items);
+      setIsLoadingDocs(false);
+      setDbError(null);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'docs');
+    });
+
+    return () => {
+      unsubscribeDocs();
+    };
+  }, [isAdminState]);
 
   useEffect(() => {
     if (currentUser) {
-      const isMaster = currentUser.email === 'broponleu998@gmail.com' || currentUser.email === 'mrponleu20000@gmail.com';
+      const emailLower = currentUser.email.toLowerCase();
+      const isMaster = emailLower === 'broponleu998@gmail.com' || emailLower === 'mrponleu20000@gmail.com';
       if (isMaster) {
         setIsAdminState(true);
       } else {
-        const isAdmin = admins.some(a => a.email?.toLowerCase() === currentUser.email);
+        const isAdmin = admins.some(a => a.email?.toLowerCase() === emailLower);
         setIsAdminState(isAdmin);
       }
     } else {
@@ -148,8 +230,15 @@ export default function App() {
     }
   }, [currentUser, admins]);
 
-  const signInWithGoogle = () => {
-    setIsLoginModalOpen(true);
+  const signInWithGoogle = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+      showNotification('ចូលគណនីទទួលបានជោគជ័យ');
+    } catch (error: any) {
+      console.error(error);
+      // Fallback offline email modal robust activation if blocker or popup is absent
+      setIsLoginModalOpen(true);
+    }
   };
 
   const handleLoginSubmit = () => {
@@ -157,15 +246,19 @@ export default function App() {
       const emailLower = loginEmail.toLowerCase();
       const user = { email: emailLower, displayName: emailLower.split('@')[0] };
       setCurrentUser(user);
-      localStorage.setItem('currentUser', JSON.stringify(user));
       setIsLoginModalOpen(false);
       setLoginEmail('');
     }
   };
 
-  const logout = () => {
-    setCurrentUser(null);
-    localStorage.removeItem('currentUser');
+  const logout = async () => {
+    try {
+      await signOut(auth);
+      setCurrentUser(null);
+      showNotification('បានចាកចេញពីគណនី');
+    } catch (error) {
+      console.error(error);
+    }
   };
 
   const getDriveImageUrl = (url: string) => {
@@ -198,16 +291,14 @@ export default function App() {
   const handleInlineAddCategory = async () => {
     if (!newCategoryName.trim()) return;
     try {
-      const res = await fetch('/api/categories', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newCategoryName.trim(), subTypes: [] })
+      const id = Date.now().toString() + Math.random().toString(36).substring(2, 9);
+      await setDoc(doc(db, 'categories', id), {
+        id,
+        name: newCategoryName.trim(),
+        subTypes: []
       });
-      if (res.ok) {
-        setCategories([...categories, await res.json()]);
-        setNewCategoryName('');
-        showNotification('បន្ថែមប្រភេទឯកសារបានជោគជ័យ');
-      }
+      setNewCategoryName('');
+      showNotification('បន្ថែមប្រភេទឯកសារបានជោគជ័យ');
     } catch (e) {
       console.error(e);
       showNotification('មានបញ្ហាពេលបន្ថែមប្រភេទ', 'error');
@@ -323,17 +414,11 @@ export default function App() {
     
     try {
       const newSubTypes = Array.from(new Set([...category.subTypes, subName.trim()]));
-      const res = await fetch(`/api/categories/${categoryId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subTypes: newSubTypes })
+      await updateDoc(doc(db, 'categories', categoryId), {
+        subTypes: newSubTypes
       });
-      if (res.ok) {
-        const updated = await res.json();
-        setCategories(categories.map(c => c.id === categoryId ? updated : c));
-        setNewSubTypeNames({ ...newSubTypeNames, [categoryId]: '' });
-        showNotification('បន្ថែមប្រភេទរងបានជោគជ័យ');
-      }
+      setNewSubTypeNames({ ...newSubTypeNames, [categoryId]: '' });
+      showNotification('បន្ថែមប្រភេទរងបានជោគជ័យ');
     } catch (e) {
       console.error(e);
       showNotification('មានបញ្ហាពេលបន្ថែមប្រភេទរង', 'error');
@@ -447,15 +532,9 @@ export default function App() {
 
   const handleToggleHide = async (docObj: DocumentItem) => {
     try {
-      const res = await fetch(`/api/docs/${docObj.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isHidden: !docObj.isHidden })
+      await updateDoc(doc(db, 'docs', docObj.id), {
+        isHidden: !docObj.isHidden
       });
-      if (res.ok) {
-        const updated = await res.json();
-        setDocs(docs.map(d => d.id === updated.id ? updated : d));
-      }
     } catch(e) {
       console.error("Error toggling hide:", e);
     }
@@ -489,23 +568,15 @@ export default function App() {
   const proceedDelete = async () => {
     try {
       if (deleteConfirm.type === 'doc') {
-        const res = await fetch(`/api/docs/${deleteConfirm.id}`, { method: 'DELETE' });
-        if (res.ok) setDocs(docs.filter(d => d.id !== deleteConfirm.id));
+        await deleteDoc(doc(db, 'docs', deleteConfirm.id));
       } else if (deleteConfirm.type === 'category') {
-        const res = await fetch(`/api/categories/${deleteConfirm.id}`, { method: 'DELETE' });
-        if (res.ok) setCategories(categories.filter(c => c.id !== deleteConfirm.id));
+        await deleteDoc(doc(db, 'categories', deleteConfirm.id));
       } else if (deleteConfirm.type === 'subType' && deleteConfirm.extra) {
         const category = categories.find(c => c.id === deleteConfirm.id);
         if (category) {
-          const res = await fetch(`/api/categories/${deleteConfirm.id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ subTypes: category.subTypes.filter((s: string) => s !== deleteConfirm.extra) })
+          await updateDoc(doc(db, 'categories', deleteConfirm.id), {
+            subTypes: category.subTypes.filter((s: string) => s !== deleteConfirm.extra)
           });
-          if (res.ok) {
-             const updated = await res.json();
-             setCategories(categories.map(c => c.id === deleteConfirm.id ? updated : c));
-          }
         }
       }
       showNotification('លុបទិន្នន័យបានជោគជ័យ');
@@ -555,15 +626,9 @@ export default function App() {
       }
       
       try {
-        const res = await fetch(`/api/docs/${docObj.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ downloads: (docObj.downloads || 0) + 1 })
+        await updateDoc(doc(db, 'docs', docObj.id), {
+          downloads: (docObj.downloads || 0) + 1
         });
-        if (res.ok) {
-          const updated = await res.json();
-          setDocs(docs.map(d => d.id === updated.id ? updated : d));
-        }
       } catch (e) {
         console.error("Error incrementing downloads:", e);
       }
@@ -583,39 +648,26 @@ export default function App() {
     const subs = categoryFormData.subTypes.split(',').map(s => s.trim()).filter(s => s);
     try {
       if (editingCategory) {
-        const res = await fetch(`/api/categories/${editingCategory.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: categoryFormData.name, subTypes: subs })
+        await updateDoc(doc(db, 'categories', editingCategory.id), {
+          name: categoryFormData.name,
+          subTypes: subs
         });
-        if (res.ok) {
-          const updated = await res.json();
-          setCategories(categories.map(c => c.id === updated.id ? updated : c));
-        }
       } else {
         if (categoryModalMode === 'subtype') {
           const category = categories.find(c => c.name === categoryFormData.name);
           if (category) {
             const newSubtypes = Array.from(new Set([...category.subTypes, ...subs]));
-            const res = await fetch(`/api/categories/${category.id}`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ subTypes: newSubtypes })
+            await updateDoc(doc(db, 'categories', category.id), {
+              subTypes: newSubtypes
             });
-            if (res.ok) {
-              const updated = await res.json();
-              setCategories(categories.map(c => c.id === updated.id ? updated : c));
-            }
           }
         } else {
-          const res = await fetch('/api/categories', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: categoryFormData.name, subTypes: subs })
+          const id = Date.now().toString() + Math.random().toString(36).substring(2, 9);
+          await setDoc(doc(db, 'categories', id), {
+            id,
+            name: categoryFormData.name,
+            subTypes: subs
           });
-          if (res.ok) {
-             setCategories([...categories, await res.json()]);
-          }
         }
       }
       setIsCategoryModalOpen(false);
@@ -634,25 +686,29 @@ export default function App() {
         tags: tagsInput.split(',').map(t => t.trim()).filter(Boolean) 
       };
       
+      const details = {
+        title: finalData.title || '',
+        description: finalData.description || '',
+        coverUrl: finalData.coverUrl || '',
+        fileSize: finalData.fileSize || '',
+        fileType: finalData.fileType || '',
+        downloadUrl: finalData.downloadUrl || '',
+        uploadDate: finalData.uploadDate || '',
+        downloads: Number(finalData.downloads || 0),
+        type: finalData.type || '',
+        subType: finalData.subType || '',
+        isHidden: !!finalData.isHidden,
+        tags: finalData.tags || []
+      };
+
       if (editingDoc) {
-        const res = await fetch(`/api/docs/${editingDoc.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(finalData)
-        });
-        if (res.ok) {
-          const updated = await res.json();
-          setDocs(docs.map(d => d.id === updated.id ? updated : d));
-        }
+        await updateDoc(doc(db, 'docs', editingDoc.id), details);
       } else {
-        const res = await fetch('/api/docs', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(finalData)
+        const id = Date.now().toString() + Math.random().toString(36).substring(2, 9);
+        await setDoc(doc(db, 'docs', id), {
+          id,
+          ...details
         });
-        if (res.ok) {
-          setDocs([...docs, await res.json()]);
-        }
       }
       setIsModalOpen(false);
       showNotification('រក្សាទុកបានជោគជ័យ');
@@ -676,99 +732,7 @@ export default function App() {
   const inputClasses = "w-full bg-[#0A0C10] border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors";
   const labelClasses = "block text-xs font-medium text-slate-400 mb-1.5";
 
-  if (dbError) {
-    const isPort6543 = dbCheckData?.port === '6543';
-    const isPasswordError = dbCheckData?.testError?.message?.toLowerCase().includes('password authentication failed') || dbError.toLowerCase().includes('password authentication failed');
-    const isTimeoutError = dbCheckData?.testError?.message?.toLowerCase().includes('timeout') || dbCheckData?.testError?.code === 'ETIMEDOUT' || dbError.toLowerCase().includes('timeout') || dbError.toLowerCase().includes('etimedout');
 
-    return (
-      <div className="min-h-screen bg-[#0A0C10] flex items-center justify-center p-4">
-        <div className="bg-[#11141A] p-8 rounded-2xl max-w-xl w-full text-center border border-rose-500/20 shadow-2xl">
-          <HardDriveDownload className="w-16 h-16 text-rose-500 mx-auto mb-4 opacity-80" />
-          <h2 className="text-2xl font-bold text-white mb-2 font-['Odor_Mean_Chey']">ទាមទារការកំណត់ Database</h2>
-          <p className="text-rose-400 mb-6 font-['KhmerOSBattambang'] leading-relaxed text-sm bg-rose-500/5 p-4 rounded-xl border border-rose-500/10 text-left font-mono break-all whitespace-pre-wrap">
-            {dbError}
-          </p>
-
-          {/* Diagnostic Box */}
-          {dbCheckData && (
-            <div className="text-left bg-[#0A0C10] p-5 rounded-xl border border-white/5 text-sm text-slate-300 font-['KhmerOSBattambang'] mb-6 space-y-4">
-              <h3 className="text-blue-400 font-semibold border-b border-white/5 pb-2 flex items-center justify-between">
-                <span>🔍 ព័ត៌មានវិនិច្ឆ័យ (Diagnostics)</span>
-                <span className="text-xs font-mono bg-blue-500/10 px-2 py-0.5 rounded text-blue-300">
-                  {isCheckingDb ? "កំពុងពិនិត្យ..." : "រួចរាល់"}
-                </span>
-              </h3>
-
-              <div className="grid grid-cols-2 gap-2 text-xs font-mono text-slate-400">
-                <div>Host: <span className="text-white font-semibold">{dbCheckData.host || 'មិនស្គាល់'}</span></div>
-                <div>Port: <span className="text-white font-semibold">{dbCheckData.port || 'មិនស្គាល់'}</span></div>
-                <div className="col-span-2">Database: <span className="text-white font-semibold">{dbCheckData.database || 'មិនស្គាល់'}</span></div>
-              </div>
-
-              {/* Specific Solution Guidelines */}
-              <div className="mt-3 p-3 bg-blue-950/20 border border-blue-500/10 rounded-lg text-xs space-y-2 text-slate-300">
-                <span className="font-bold text-blue-400">💡 ដំណោះស្រាយដែលណែនាំ៖</span>
-                
-                {isPort6543 && (
-                  <p className="leading-relaxed">
-                    👉 <strong className="text-amber-400">ប្តូរទៅកាន់ Port 5432:</strong> បច្ចុប្បន្នអ្នកកំពុងប្រើប្រាស់ Port <span className="text-rose-400">6543</span> (Transaction Mode)។ សម្រាប់ប្រព័ន្ធ Node.js សកម្មភាពបង្កើត និងគ្រប់គ្រងតារាងនឹងដំណើរការបានល្អបំផុតនៅលើ <span className="text-emerald-400">Port 5432 (Session Mode)</span>។ សូមសាកល្បងប្តូរលេខ <code className="bg-white/5 px-1.5 py-0.5 rounded">6543</code> ទៅជា <code className="bg-emerald-500/20 px-1.5 py-0.5 rounded text-emerald-300">5432</code> នៅក្នុង DATABASE_URL របស់អ្នក ក្នុងផ្ទាំង Secrets រួចចុច Save និងចុចប៊ូតុង "ព្យាយាមម្ដងទៀត"។
-                  </p>
-                )}
-
-                {isPasswordError && (
-                  <p className="leading-relaxed">
-                    👉 <strong className="text-amber-400">បញ្ហាពាក្យសម្ងាត់ (Password):</strong> ប្រព័ន្ធបង្ហាញថាពាក្យសម្ងាត់ ឬឈ្មោះមិនត្រឹមត្រូវ។ សូមប្រាកដថាពាក្យសម្ងាត់ Supabase របស់អ្នកត្រឹមត្រូវ។ <span className="text-rose-300">ចំណាំ៖</span> ប្រសិនបើពាក្យសម្ងាត់របស់អ្នកមាននិមិត្តសញ្ញាពិសេសដូចជា <code className="bg-white/5 px-1 rounded">@</code> សូមជំនួសវាដោយ <code className="bg-white/5 px-1 rounded">%40</code> នៅក្នុង URL។
-                  </p>
-                )}
-
-                {isTimeoutError && (
-                  <p className="leading-relaxed">
-                    👉 <strong className="text-amber-400">ការភ្ជាប់ហួសពេល (Timeout):</strong> មិនអាចភ្ជាប់ទៅកាន់ម៉ាស៊ីនមេបាន។ សូមប្រាកដថា៖
-                    <br />១. Supabase Project របស់អ្នកមិនស្ថិតក្នុងសភាពផ្អាក (Not Paused)។
-                    <br />២. មិនមានការកំណត់ប្រព័ន្ធការពាររឹតត្បិត IP (No IP Allowlist Restrictions) នៅក្នុង Supabase Dashboard។
-                  </p>
-                )}
-
-                {!isPort6543 && !isPasswordError && !isTimeoutError && (
-                  <p className="leading-relaxed">
-                    👉 សូមពិនិត្យផ្ទៀងផ្ទាត់ការបញ្ចូល <strong className="text-blue-400">DATABASE_URL</strong> ក្នុង "Secrets" របស់ AI Studio ឱ្យប្រាកដថាគ្មានចន្លោះ (spaces) ឬតួអក្សរខុសឆ្គងណាមួយ។
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
-
-          {!dbCheckData && (
-            <div className="text-left bg-[#0A0C10] p-4 rounded-lg border border-white/5 text-sm text-slate-400 font-mono mb-6">
-              <p className="mb-2">1. បង្កើតមូលដ្ឋានទិន្នន័យ PostgreSQL</p>
-              <p className="mb-2">2. ចូលទៅកាន់ "Secrets" ក្នុង AI Studio</p>
-              <p>3. បន្ថែមឈ្មោះ Secret <span className="text-blue-400 font-bold">DATABASE_URL</span> និងដាក់តម្លៃ Connection String រួច Restart Server។</p>
-            </div>
-          )}
-
-          <div className="flex gap-3">
-            <button 
-              onClick={() => {
-                setDbCheckData(null);
-                performDbCheck();
-              }} 
-              className="px-4 py-3 bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 rounded-xl font-medium transition-all font-['KhmerOSBattambang'] flex flex-row items-center justify-center gap-2"
-              disabled={isCheckingDb}
-            >
-              {isCheckingDb ? "កំពុងឆែក..." : "🔍 វិភាគឡើងវិញ"}
-            </button>
-            <button 
-              onClick={() => window.location.reload()} 
-              className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-colors font-['KhmerOSBattambang'] flex flex-row items-center justify-center gap-2"
-            >
-              <Loader2 className={`w-4 h-4 ${isCheckingDb ? 'animate-spin' : ''}`} /> ព្យាយាមម្ដងទៀត
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="flex h-screen bg-[#0A0C10] text-[#E2E8F0] font-sans overflow-hidden">
@@ -1524,16 +1488,13 @@ export default function App() {
                         if (email && email.includes('@')) {
                           try {
                             if (editingAdminEmail && editingAdminEmail !== email) {
-                              await fetch(`/api/admins/${editingAdminEmail}`, { method: 'DELETE' });
+                              await deleteDoc(doc(db, 'admins', editingAdminEmail));
                             }
-                            await fetch('/api/admins', { 
-                              method: 'POST', 
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ email, role: newAdminRole }) 
+                            await setDoc(doc(db, 'admins', email), {
+                              email,
+                              role: newAdminRole,
+                              addedAt: new Date().toISOString()
                             });
-                            // Re-fetch admins
-                            const adminRes = await fetch('/api/admins');
-                            if (adminRes.ok) setAdmins(await adminRes.json());
                             
                             setNewAdminEmail('');
                             setEditingAdminEmail(null);
@@ -1575,15 +1536,13 @@ export default function App() {
                       if (email && email.includes('@')) {
                         try {
                           if (editingAdminEmail && editingAdminEmail !== email) {
-                            await fetch(`/api/admins/${editingAdminEmail}`, { method: 'DELETE' });
+                            await deleteDoc(doc(db, 'admins', editingAdminEmail));
                           }
-                          await fetch('/api/admins', { 
-                            method: 'POST', 
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ email, role: newAdminRole }) 
+                          await setDoc(doc(db, 'admins', email), {
+                            email,
+                            role: newAdminRole,
+                            addedAt: new Date().toISOString()
                           });
-                          const adminRes = await fetch('/api/admins');
-                          if (adminRes.ok) setAdmins(await adminRes.json());
                           setNewAdminEmail('');
                           setEditingAdminEmail(null);
                           setNewAdminRole('admin');
@@ -1644,11 +1603,8 @@ export default function App() {
                       onClick={async () => {
                         if(window.confirm('តើអ្នកពិតជាចង់ដកសិទ្ធិ Admin នេះមែនទេ?')) {
                           try {
-                            const res = await fetch(`/api/admins/${ad.email}`, { method: 'DELETE' });
-                            if (res.ok) {
-                              setAdmins(admins.filter(a => a.email !== ad.email));
-                              showNotification('បានដកសិទ្ធិជោគជ័យ');
-                            }
+                            await deleteDoc(doc(db, 'admins', ad.email));
+                            showNotification('បានដកសិទ្ធិជោគជ័យ');
                           } catch (e) {
                             showNotification('មានបញ្ហា', 'error');
                           }
