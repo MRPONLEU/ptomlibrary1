@@ -73,8 +73,30 @@ export default function App() {
   const [isLoadingDocs, setIsLoadingDocs] = useState(true);
   const [isLoadingCategories, setIsLoadingCategories] = useState(true);
   const [dbError, setDbError] = useState<string | null>(null);
+  const [dbCheckData, setDbCheckData] = useState<any>(null);
+  const [isCheckingDb, setIsCheckingDb] = useState(false);
   const [quotaError, setQuotaError] = useState(false);
   const isLoading = isLoadingDocs || isLoadingCategories;
+
+  const performDbCheck = async () => {
+    setIsCheckingDb(true);
+    try {
+      const res = await fetch('/api/db-check');
+      if (res.ok) {
+        setDbCheckData(await res.json());
+      }
+    } catch (e) {
+      console.error("Failed to fetch database check info:", e);
+    } finally {
+      setIsCheckingDb(false);
+    }
+  };
+
+  useEffect(() => {
+    if (dbError) {
+      performDbCheck();
+    }
+  }, [dbError]);
 
   const fetchData = async () => {
     try {
@@ -655,25 +677,94 @@ export default function App() {
   const labelClasses = "block text-xs font-medium text-slate-400 mb-1.5";
 
   if (dbError) {
+    const isPort6543 = dbCheckData?.port === '6543';
+    const isPasswordError = dbCheckData?.testError?.message?.toLowerCase().includes('password authentication failed') || dbError.toLowerCase().includes('password authentication failed');
+    const isTimeoutError = dbCheckData?.testError?.message?.toLowerCase().includes('timeout') || dbCheckData?.testError?.code === 'ETIMEDOUT' || dbError.toLowerCase().includes('timeout') || dbError.toLowerCase().includes('etimedout');
+
     return (
       <div className="min-h-screen bg-[#0A0C10] flex items-center justify-center p-4">
-        <div className="bg-[#11141A] p-8 rounded-2xl max-w-lg w-full text-center border border-rose-500/20 shadow-2xl">
+        <div className="bg-[#11141A] p-8 rounded-2xl max-w-xl w-full text-center border border-rose-500/20 shadow-2xl">
           <HardDriveDownload className="w-16 h-16 text-rose-500 mx-auto mb-4 opacity-80" />
           <h2 className="text-2xl font-bold text-white mb-2 font-['Odor_Mean_Chey']">ទាមទារការកំណត់ Database</h2>
-          <p className="text-slate-300 mb-6 font-['KhmerOSBattambang'] leading-relaxed text-sm">
+          <p className="text-rose-400 mb-6 font-['KhmerOSBattambang'] leading-relaxed text-sm bg-rose-500/5 p-4 rounded-xl border border-rose-500/10 text-left font-mono break-all whitespace-pre-wrap">
             {dbError}
           </p>
-          <div className="text-left bg-[#0A0C10] p-4 rounded-lg border border-white/5 text-sm text-slate-400 font-mono mb-6">
-            <p className="mb-2">1. បង្កើតមូលដ្ឋានទិន្នន័យ PostgreSQL</p>
-            <p className="mb-2">2. ចូលទៅកាន់ "Secrets" ក្នុង AI Studio</p>
-            <p>3. បន្ថែមឈ្មោះ Secret <span className="text-blue-400 font-bold">DATABASE_URL</span> និងដាក់តម្លៃ Connection String រួច Restart Server។</p>
+
+          {/* Diagnostic Box */}
+          {dbCheckData && (
+            <div className="text-left bg-[#0A0C10] p-5 rounded-xl border border-white/5 text-sm text-slate-300 font-['KhmerOSBattambang'] mb-6 space-y-4">
+              <h3 className="text-blue-400 font-semibold border-b border-white/5 pb-2 flex items-center justify-between">
+                <span>🔍 ព័ត៌មានវិនិច្ឆ័យ (Diagnostics)</span>
+                <span className="text-xs font-mono bg-blue-500/10 px-2 py-0.5 rounded text-blue-300">
+                  {isCheckingDb ? "កំពុងពិនិត្យ..." : "រួចរាល់"}
+                </span>
+              </h3>
+
+              <div className="grid grid-cols-2 gap-2 text-xs font-mono text-slate-400">
+                <div>Host: <span className="text-white font-semibold">{dbCheckData.host || 'មិនស្គាល់'}</span></div>
+                <div>Port: <span className="text-white font-semibold">{dbCheckData.port || 'មិនស្គាល់'}</span></div>
+                <div className="col-span-2">Database: <span className="text-white font-semibold">{dbCheckData.database || 'មិនស្គាល់'}</span></div>
+              </div>
+
+              {/* Specific Solution Guidelines */}
+              <div className="mt-3 p-3 bg-blue-950/20 border border-blue-500/10 rounded-lg text-xs space-y-2 text-slate-300">
+                <span className="font-bold text-blue-400">💡 ដំណោះស្រាយដែលណែនាំ៖</span>
+                
+                {isPort6543 && (
+                  <p className="leading-relaxed">
+                    👉 <strong className="text-amber-400">ប្តូរទៅកាន់ Port 5432:</strong> បច្ចុប្បន្នអ្នកកំពុងប្រើប្រាស់ Port <span className="text-rose-400">6543</span> (Transaction Mode)។ សម្រាប់ប្រព័ន្ធ Node.js សកម្មភាពបង្កើត និងគ្រប់គ្រងតារាងនឹងដំណើរការបានល្អបំផុតនៅលើ <span className="text-emerald-400">Port 5432 (Session Mode)</span>។ សូមសាកល្បងប្តូរលេខ <code className="bg-white/5 px-1.5 py-0.5 rounded">6543</code> ទៅជា <code className="bg-emerald-500/20 px-1.5 py-0.5 rounded text-emerald-300">5432</code> នៅក្នុង DATABASE_URL របស់អ្នក ក្នុងផ្ទាំង Secrets រួចចុច Save និងចុចប៊ូតុង "ព្យាយាមម្ដងទៀត"។
+                  </p>
+                )}
+
+                {isPasswordError && (
+                  <p className="leading-relaxed">
+                    👉 <strong className="text-amber-400">បញ្ហាពាក្យសម្ងាត់ (Password):</strong> ប្រព័ន្ធបង្ហាញថាពាក្យសម្ងាត់ ឬឈ្មោះមិនត្រឹមត្រូវ។ សូមប្រាកដថាពាក្យសម្ងាត់ Supabase របស់អ្នកត្រឹមត្រូវ។ <span className="text-rose-300">ចំណាំ៖</span> ប្រសិនបើពាក្យសម្ងាត់របស់អ្នកមាននិមិត្តសញ្ញាពិសេសដូចជា <code className="bg-white/5 px-1 rounded">@</code> សូមជំនួសវាដោយ <code className="bg-white/5 px-1 rounded">%40</code> នៅក្នុង URL។
+                  </p>
+                )}
+
+                {isTimeoutError && (
+                  <p className="leading-relaxed">
+                    👉 <strong className="text-amber-400">ការភ្ជាប់ហួសពេល (Timeout):</strong> មិនអាចភ្ជាប់ទៅកាន់ម៉ាស៊ីនមេបាន។ សូមប្រាកដថា៖
+                    <br />១. Supabase Project របស់អ្នកមិនស្ថិតក្នុងសភាពផ្អាក (Not Paused)។
+                    <br />២. មិនមានការកំណត់ប្រព័ន្ធការពាររឹតត្បិត IP (No IP Allowlist Restrictions) នៅក្នុង Supabase Dashboard។
+                  </p>
+                )}
+
+                {!isPort6543 && !isPasswordError && !isTimeoutError && (
+                  <p className="leading-relaxed">
+                    👉 សូមពិនិត្យផ្ទៀងផ្ទាត់ការបញ្ចូល <strong className="text-blue-400">DATABASE_URL</strong> ក្នុង "Secrets" របស់ AI Studio ឱ្យប្រាកដថាគ្មានចន្លោះ (spaces) ឬតួអក្សរខុសឆ្គងណាមួយ។
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {!dbCheckData && (
+            <div className="text-left bg-[#0A0C10] p-4 rounded-lg border border-white/5 text-sm text-slate-400 font-mono mb-6">
+              <p className="mb-2">1. បង្កើតមូលដ្ឋានទិន្នន័យ PostgreSQL</p>
+              <p className="mb-2">2. ចូលទៅកាន់ "Secrets" ក្នុង AI Studio</p>
+              <p>3. បន្ថែមឈ្មោះ Secret <span className="text-blue-400 font-bold">DATABASE_URL</span> និងដាក់តម្លៃ Connection String រួច Restart Server។</p>
+            </div>
+          )}
+
+          <div className="flex gap-3">
+            <button 
+              onClick={() => {
+                setDbCheckData(null);
+                performDbCheck();
+              }} 
+              className="px-4 py-3 bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 rounded-xl font-medium transition-all font-['KhmerOSBattambang'] flex flex-row items-center justify-center gap-2"
+              disabled={isCheckingDb}
+            >
+              {isCheckingDb ? "កំពុងឆែក..." : "🔍 វិភាគឡើងវិញ"}
+            </button>
+            <button 
+              onClick={() => window.location.reload()} 
+              className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-colors font-['KhmerOSBattambang'] flex flex-row items-center justify-center gap-2"
+            >
+              <Loader2 className={`w-4 h-4 ${isCheckingDb ? 'animate-spin' : ''}`} /> ព្យាយាមម្ដងទៀត
+            </button>
           </div>
-          <button 
-            onClick={() => window.location.reload()} 
-            className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-colors font-['KhmerOSBattambang'] flex flex-row items-center justify-center gap-2"
-          >
-            <Loader2 className="w-4 h-4" /> ព្យាយាមម្ដងទៀត
-          </button>
         </div>
       </div>
     );

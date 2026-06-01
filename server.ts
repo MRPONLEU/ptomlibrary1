@@ -10,7 +10,9 @@ dns.setDefaultResultOrder("ipv4first");
 
 dotenv.config();
 
-const connectionString = process.env.DATABASE_URL;
+const rawConnectionString = process.env.DATABASE_URL;
+// Remove any leading/trailing spaces or surrounding quotes pasted accidentally
+const connectionString = rawConnectionString ? rawConnectionString.trim().replace(/^["']|["']$/g, "") : undefined;
 let pool: Pool | null = null;
 let dbInitError: string | null = null;
 
@@ -33,7 +35,10 @@ if (connectionString) {
   console.log(`[Database] Initializing connection pool to host: ${parsedHost}, port: ${parsedPort}, database: ${parsedDbName}`);
   pool = new Pool({
     connectionString,
-    ssl: connectionString.includes('localhost') ? false : { rejectUnauthorized: false }
+    ssl: connectionString.includes('localhost') ? false : { rejectUnauthorized: false },
+    max: 2, // Optimal for serverless environments (like Vercel) to avoid exhausting DB connections
+    idleTimeoutMillis: 10000, // Close idle clients after 10 seconds to release database connections quickly
+    connectionTimeoutMillis: 5000, // Time out fast (5s) instead of waiting indefinitely if blocked by firewall
   });
 }
 
@@ -106,6 +111,40 @@ async function startServer() {
   }
 
   // --- API Routes ---
+  app.get("/api/db-check", async (req, res) => {
+    let testError: any = null;
+    let testSuccess = false;
+    if (pool) {
+      try {
+        console.log("[Database Debug] Manual test connecting to pool...");
+        const client = await pool.connect();
+        const testRes = await client.query("SELECT 1");
+        console.log("[Database Debug] Connection query SELECT 1 succeeded!", testRes.rows);
+        client.release();
+        testSuccess = true;
+      } catch (err: any) {
+        console.error("[Database Debug] Manual connection test failed:", err);
+        testError = {
+          message: err.message,
+          code: err.code,
+          stack: err.stack,
+          severity: err.severity,
+          detail: err.detail,
+          hint: err.hint,
+        };
+      }
+    }
+    res.json({
+      configured: !!connectionString,
+      host: parsedHost,
+      port: parsedPort,
+      database: parsedDbName,
+      dbInitError,
+      testSuccess,
+      testError,
+    });
+  });
+
   app.use("/api", (req, res, next) => {
     if (!pool) {
       return res.status(500).json({ error: "DATABASE_URL environment variable is missing. Please configure it with your PostgreSQL connection string in the Secrets panel." });
