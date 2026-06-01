@@ -14,7 +14,23 @@ const connectionString = process.env.DATABASE_URL;
 let pool: Pool | null = null;
 let dbInitError: string | null = null;
 
+let parsedHost = "unknown";
+let parsedPort = "unknown";
+let parsedDbName = "unknown";
+
+try {
+  if (connectionString) {
+    const url = new URL(connectionString.startsWith('postgres') ? connectionString : `postgres://${connectionString}`);
+    parsedHost = url.hostname;
+    parsedPort = url.port || "5432";
+    parsedDbName = url.pathname.replace(/^\//, "");
+  }
+} catch (e) {
+  parsedHost = "custom-connection-string";
+}
+
 if (connectionString) {
+  console.log(`[Database] Initializing connection pool to host: ${parsedHost}, port: ${parsedPort}, database: ${parsedDbName}`);
   pool = new Pool({
     connectionString,
     ssl: connectionString.includes('localhost') ? false : { rejectUnauthorized: false }
@@ -22,9 +38,14 @@ if (connectionString) {
 }
 
 async function initializeDatabase() {
-  if (!pool) return;
+  if (!pool) {
+    console.warn("[Database] No connection pool initialized (DATABASE_URL is missing).");
+    return;
+  }
   try {
+    console.log(`[Database] Testing connection to ${parsedHost}:${parsedPort}...`);
     await pool.query('SELECT 1'); // Test connection first
+    console.log(`[Database] Connection test succeeded! Initializing tables...`);
     await pool.query(`
       CREATE TABLE IF NOT EXISTS admins (
         id SERIAL PRIMARY KEY,
